@@ -1,0 +1,25 @@
+# Environment files
+.env
+**/.env
+
+# Python artifacts
+**/venv/
+**/__pycache__/
+**/*.pyc
+
+# Node artifacts
+**/node_modules/
+**/dist/
+
+# Logs
+*.log
+**/*.log
+nohup.out
+
+# Cache files with potentially sensitive data
+email_cache.json
+feature_flags_store.json
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+      - name: Build
+        run: npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Syntax checks
+        run: python -m py_compile *.py tools/email_tool.py
+      - name: Smoke checks (optional, external URL)
+        if: ${{ vars.BACKEND_SMOKE_URL != '' }}
+        env:
+          API_URL: ${{ vars.BACKEND_SMOKE_URL }}
+          BACKEND_SMOKE_EMAIL: ${{ secrets.BACKEND_SMOKE_EMAIL }}
+          BACKEND_SMOKE_PASSWORD: ${{ secrets.BACKEND_SMOKE_PASSWORD }}
+        run: python test_production_ready.py --expect-db
