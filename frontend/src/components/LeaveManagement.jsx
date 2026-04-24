@@ -4,13 +4,12 @@ import { ChevronLeft, Plus, CheckCircle, XCircle, Clock, Search, Loader2, Calend
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-toastify';
 import { useAuth } from '../lib/AuthProvider';
-import { getLeaves, submitLeave, approveLeave, rejectLeave, getFaculty } from '../lib/api';
+import { getLeaves, approveLeave, rejectLeave } from '../lib/api';
 import './LeaveManagement.css';
 
 const LeaveManagement = () => {
   const { user } = useAuth();
   const [leaves, setLeaves] = useState([]);
-  const [faculty, setFaculty] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -18,7 +17,6 @@ const LeaveManagement = () => {
 
   useEffect(() => {
     fetchLeaves();
-    fetchFaculty();
   }, []);
 
   const fetchLeaves = async () => {
@@ -47,15 +45,7 @@ const LeaveManagement = () => {
     }
   };
 
-  const fetchFaculty = async () => {
-    try {
-      const response = await getFaculty();
-      const facultyData = Array.isArray(response) ? response : (response?.faculty || response?.data || []);
-      setFaculty(facultyData);
-    } catch (error) {
-      console.error('Error fetching faculty:', error);
-    }
-  };
+
 
   const filteredLeaves = leaves.filter(leave => {
     const matchesSearch = leave.faculty_name.toLowerCase().includes(searchQuery.toLowerCase()) ||

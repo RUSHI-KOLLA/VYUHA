@@ -165,7 +165,6 @@ const UserManagement = () => {
       case 'admin': return '#ef4444';
       case 'principal': return '#f59e0b';
       case 'faculty': return '#3b82f6';
-      case 'admin': return '#8b5cf6';
       default: return '#6b7280';
     }
   };
