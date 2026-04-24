@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Calendar, User, LogOut, CheckCircle2, AlertTriangle, Sparkles, BookOpen, CalendarDays } from 'lucide-react';
 import { useAuth } from '../lib/AuthProvider';
 import { toast } from 'react-toastify';
-import { timetableAPI, getFaculty, submitLeave, getLeaves } from '../lib/api';
+import { timetableAPI, getFaculty, submitLeave, getLeaves, substitutionAPI } from '../lib/api';
 import NotificationDropdown from './NotificationDropdown';
 import './Dashboard.css'; // Reusing global secure 3D styles
 
@@ -16,6 +16,8 @@ const FacultyDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [facultyData, setFacultyData] = useState(null);
+  const [replacementAssignments, setReplacementAssignments] = useState([]);
+  const [myCoveredClasses, setMyCoveredClasses] = useState([]);
 
   const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
   const [leaveFormData, setLeaveFormData] = useState({
@@ -29,14 +31,15 @@ const FacultyDashboard = () => {
     const fetchMyData = async () => {
       try {
         setLoading(true);
-        // Find faculty matching logged in user email
+        // Resolve faculty from logged-in account: prefer user_id, fallback email.
         const listRes = await getFaculty();
         const allFaculty = listRes.faculty || listRes;
         
         let me = null;
         if (Array.isArray(allFaculty)) {
-           // Case-insensitive email comparison to avoid mapping bugs
-           me = allFaculty.find(f => f.email?.toLowerCase() === user?.email?.toLowerCase());
+          const normalizedUserId = String(user?.id ?? '');
+          me = allFaculty.find((f) => String(f.user_id ?? '') === normalizedUserId)
+            || allFaculty.find((f) => f.email?.toLowerCase() === user?.email?.toLowerCase());
         }
         
         if (me) {
@@ -47,9 +50,24 @@ const FacultyDashboard = () => {
           try {
             const leavesRes = await getLeaves();
             const leavesData = Array.isArray(leavesRes) ? leavesRes : (leavesRes?.leaves || []);
-            setMyLeaves(leavesData);
+            // Only show leaves for THIS faculty
+            const myFilteredLeaves = leavesData.filter(l => l.faculty_id === me.id);
+            setMyLeaves(myFilteredLeaves);
           } catch (e) {
             console.error("Error fetching leaves", e);
+          }
+
+          try {
+            const [assignmentsRes, coveredRes] = await Promise.all([
+              substitutionAPI.getMyAssignments(),
+              substitutionAPI.getMyCovered(),
+            ]);
+            setReplacementAssignments(assignmentsRes?.assignments || []);
+            setMyCoveredClasses(coveredRes?.covered || []);
+          } catch (e) {
+            console.error("Error fetching substitution details", e);
+            setReplacementAssignments([]);
+            setMyCoveredClasses([]);
           }
         } else {
           setError("Your user profile is not linked to an active faculty record. Please contact the administrator.");
@@ -110,9 +128,11 @@ const FacultyDashboard = () => {
       try {
         const leavesRes = await getLeaves();
         const leavesData = Array.isArray(leavesRes) ? leavesRes : (leavesRes?.leaves || []);
-        setMyLeaves(leavesData);
+        // MUST FILTER HERE TOO
+        const myFilteredLeaves = leavesData.filter(l => l.faculty_id === facultyData.id);
+        setMyLeaves(myFilteredLeaves);
       } catch (e) {
-        console.error("Error fetching leaves", e);
+        console.error("Error refreshing leaves", e);
       }
     } catch (error) {
       console.error('Error submitting leave:', error);
@@ -223,6 +243,76 @@ const FacultyDashboard = () => {
                 ))}
               </div>
             </div>
+
+            {replacementAssignments.length > 0 && (
+              <div className="content-card-3d" style={{ marginTop: '2rem', padding: '2rem', borderRadius: '16px', background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.18)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                  <CheckCircle2 size={22} style={{ color: '#4ade80' }} />
+                  <h3 style={{ color: 'white', margin: 0 }}>Replacement Assignments</h3>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                  {replacementAssignments.map((assignment) => (
+                    <motion.div
+                      key={assignment.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      style={{ background: 'rgba(0,0,0,0.24)', border: '1px solid rgba(74,222,128,0.22)', borderRadius: '12px', padding: '1.25rem' }}
+                    >
+                      <div style={{ color: '#bbf7d0', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.5rem' }}>
+                        Assigned Replacement
+                      </div>
+                      <div style={{ color: 'white', fontWeight: '700', marginBottom: '0.5rem' }}>
+                        For {assignment.original_faculty_name}
+                      </div>
+                      <div style={{ color: 'rgba(255,255,255,0.72)', fontSize: '13px', lineHeight: 1.7 }}>
+                        <div>Date: {assignment.date}</div>
+                        <div>Time: {assignment.time || `${assignment.start_time || ''} - ${assignment.end_time || ''}`}</div>
+                        <div>Subject: {assignment.subject || 'Unknown'}</div>
+                        {assignment.room_id && <div>Room: {assignment.room_id}</div>}
+                      </div>
+                      <div style={{ marginTop: '0.75rem', display: 'inline-block', color: '#4ade80', fontSize: '12px', fontWeight: '700', background: 'rgba(34,197,94,0.12)', padding: '4px 8px', borderRadius: '999px', textTransform: 'uppercase' }}>
+                        {assignment.status}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {myCoveredClasses.length > 0 && (
+              <div className="content-card-3d" style={{ marginTop: '2rem', padding: '2rem', borderRadius: '16px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                  <Calendar size={22} style={{ color: '#fbbf24' }} />
+                  <h3 style={{ color: 'white', margin: 0 }}>My Classes Covered</h3>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                  {myCoveredClasses.map((item) => (
+                    <motion.div
+                      key={item.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      style={{ background: 'rgba(0,0,0,0.24)', border: '1px solid rgba(245,158,11,0.26)', borderRadius: '12px', padding: '1.25rem' }}
+                    >
+                      <div style={{ color: '#fde68a', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.5rem' }}>
+                        Covered By Replacement
+                      </div>
+                      <div style={{ color: 'white', fontWeight: '700', marginBottom: '0.5rem' }}>
+                        {item.substitute_faculty_name}
+                      </div>
+                      <div style={{ color: 'rgba(255,255,255,0.72)', fontSize: '13px', lineHeight: 1.7 }}>
+                        <div>Date: {item.date}</div>
+                        <div>Time: {item.time || `${item.start_time || ''} - ${item.end_time || ''}`}</div>
+                        <div>Subject: {item.subject || 'Unknown'}</div>
+                        {item.room_id && <div>Room: {item.room_id}</div>}
+                      </div>
+                      <div style={{ marginTop: '0.75rem', display: 'inline-block', color: '#fbbf24', fontSize: '12px', fontWeight: '700', background: 'rgba(245,158,11,0.14)', padding: '4px 8px', borderRadius: '999px', textTransform: 'uppercase' }}>
+                        {item.status}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         )}
 

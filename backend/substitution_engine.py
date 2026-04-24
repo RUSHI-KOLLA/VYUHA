@@ -12,6 +12,101 @@ class SubstitutionAssign(BaseModel):
     slot_id: int
     substitute_faculty_id: int
 
+
+def _resolve_faculty_for_user(college_id: str, current_user: dict):
+    """Resolve faculty row for logged-in user using user_id first, then email fallback."""
+    user_id = current_user.get("id")
+    email = str(current_user.get("email") or "").strip()
+
+    if user_id is not None:
+        by_user_res = (
+            supabase.table("faculty")
+            .select("id,name,email,user_id")
+            .eq("college_id", college_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if by_user_res.data:
+            return by_user_res.data[0]
+
+    if email:
+        by_email_res = (
+            supabase.table("faculty")
+            .select("id,name,email,user_id")
+            .eq("college_id", college_id)
+            .ilike("email", email)
+            .limit(1)
+            .execute()
+        )
+        if by_email_res.data:
+            return by_email_res.data[0]
+
+    return None
+
+
+def _enrich_substitution_rows(college_id: str, rows: list[dict]) -> list[dict]:
+    """Attach faculty/slot/subject labels used by dashboards."""
+    if not rows:
+        return []
+
+    all_faculty_ids = list(set([s["original_faculty_id"] for s in rows] + [s["substitute_faculty_id"] for s in rows]))
+    faculty_map = {}
+    if all_faculty_ids:
+        fac_res = (
+            supabase.table("faculty")
+            .select("id,name")
+            .eq("college_id", college_id)
+            .in_("id", all_faculty_ids)
+            .execute()
+        )
+        faculty_map = {f["id"]: f["name"] for f in fac_res.data or []}
+
+    slot_ids = list(set([s["timetable_slot_id"] for s in rows]))
+    slot_map = {}
+    subject_map = {}
+    if slot_ids:
+        slots_res = (
+            supabase.table("timetable_slots")
+            .select("id,start_time,end_time,day,subject_id,room_id")
+            .eq("college_id", college_id)
+            .in_("id", slot_ids)
+            .execute()
+        )
+        slot_map = {s["id"]: s for s in slots_res.data or []}
+        subject_ids = list({s.get("subject_id") for s in (slots_res.data or []) if s.get("subject_id")})
+        if subject_ids:
+            subject_res = (
+                supabase.table("subjects")
+                .select("id,name")
+                .eq("college_id", college_id)
+                .in_("id", subject_ids)
+                .execute()
+            )
+            subject_map = {s["id"]: s["name"] for s in subject_res.data or []}
+
+    enriched = []
+    for s in rows:
+        slot_info = slot_map.get(s["timetable_slot_id"], {})
+        enriched.append({
+            "id": s["id"],
+            "original_faculty_id": s["original_faculty_id"],
+            "substitute_faculty_id": s["substitute_faculty_id"],
+            "timetable_slot_id": s["timetable_slot_id"],
+            "original_faculty_name": faculty_map.get(s["original_faculty_id"], "Unknown"),
+            "substitute_faculty_name": faculty_map.get(s["substitute_faculty_id"], "Unknown"),
+            "date": s["date"],
+            "day": slot_info.get("day"),
+            "time": f"{slot_info.get('start_time')} - {slot_info.get('end_time')}" if slot_info else "Unknown",
+            "start_time": slot_info.get("start_time"),
+            "end_time": slot_info.get("end_time"),
+            "subject": subject_map.get(slot_info.get("subject_id"), "Unknown"),
+            "room_id": slot_info.get("room_id"),
+            "status": s["status"],
+            "requested_at": s.get("requested_at"),
+        })
+    return enriched
+
 @router.post("/find/{leave_id}")
 async def find_substitution(
     leave_id: int, 
@@ -130,38 +225,59 @@ async def get_substitution_log(
         
         if not res.data:
             return {"substitutions": []}
-            
-        # Enrich with faculty names
-        all_faculty_ids = list(set([s["original_faculty_id"] for s in res.data] + [s["substitute_faculty_id"] for s in res.data]))
-        faculty_map = {}
-        if all_faculty_ids:
-            fac_res = supabase.table("faculty").select("id, name").in_("id", all_faculty_ids).execute()
-            faculty_map = {f["id"]: f["name"] for f in fac_res.data}
-            
-        # Enrich with slot info
-        slot_ids = list(set([s["timetable_slot_id"] for s in res.data]))
-        slot_map = {}
-        if slot_ids:
-            slots_res = supabase.table("timetable_slots").select("id, start_time, end_time, day").in_("id", slot_ids).execute()
-            slot_map = {s["id"]: s for s in slots_res.data}
         
-        log = []
-        for s in res.data:
-            slot_info = slot_map.get(s["timetable_slot_id"], {})
-            log.append({
-                "id": s["id"],
-                "original_faculty_name": faculty_map.get(s["original_faculty_id"], "Unknown"),
-                "substitute_faculty_name": faculty_map.get(s["substitute_faculty_id"], "Unknown"),
-                "date": s["date"],
-                "time": f"{slot_info.get('start_time')} - {slot_info.get('end_time')}" if slot_info else "Unknown",
-                "status": s["status"],
-                "requested_at": s.get("requested_at")
-            })
-        
-        return {"substitutions": log}
+        return {"substitutions": _enrich_substitution_rows(college_id, res.data)}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching substitution log: {str(e)}")
+
+
+@router.get("/my-assignments")
+async def get_my_substitution_assignments(
+    college_id: str = Depends(get_college_id),
+    current_user: dict = Depends(get_current_user)
+):
+    """Substitutions where current faculty is assigned as substitute."""
+    try:
+        faculty = _resolve_faculty_for_user(college_id, current_user)
+        if not faculty:
+            return {"assignments": []}
+
+        res = (
+            supabase.table("substitutions")
+            .select("*")
+            .eq("college_id", college_id)
+            .eq("substitute_faculty_id", faculty["id"])
+            .order("requested_at", desc=True)
+            .execute()
+        )
+        return {"assignments": _enrich_substitution_rows(college_id, res.data or [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching substitution assignments: {str(e)}")
+
+
+@router.get("/my-covered")
+async def get_my_classes_covered(
+    college_id: str = Depends(get_college_id),
+    current_user: dict = Depends(get_current_user)
+):
+    """Substitutions where current faculty is the original absent faculty."""
+    try:
+        faculty = _resolve_faculty_for_user(college_id, current_user)
+        if not faculty:
+            return {"covered": []}
+
+        res = (
+            supabase.table("substitutions")
+            .select("*")
+            .eq("college_id", college_id)
+            .eq("original_faculty_id", faculty["id"])
+            .order("requested_at", desc=True)
+            .execute()
+        )
+        return {"covered": _enrich_substitution_rows(college_id, res.data or [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching covered classes: {str(e)}")
 
 @router.get("/pending")
 async def get_pending_substitutions(

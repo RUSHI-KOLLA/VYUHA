@@ -61,7 +61,7 @@ class AutoHandler:
         original_faculty_id = slot["faculty_id"]
         
         # Get subject info
-        sub_res = supabase.table("subjects").select("name").eq("id", subject_id).execute()
+        sub_res = supabase.table("subjects").select("name").eq("id", subject_id).eq("college_id", self.college_id).execute()
         subject_name = sub_res.data[0]["name"] if sub_res.data else ""
         
         # Get all active faculty (except the one on leave)
@@ -78,7 +78,7 @@ class AutoHandler:
                 
             # RULE 2: Specific Time Availability
             # Check if faculty has a class at this time
-            conflict_res = supabase.table("timetable_slots").select("id").eq("faculty_id", fac_id).eq("day", day).eq("start_time", time_slot).execute()
+            conflict_res = supabase.table("timetable_slots").select("id").eq("college_id", self.college_id).eq("faculty_id", fac_id).eq("day", day).eq("start_time", time_slot).execute()
             if conflict_res.data:
                 continue # Faculty already has a class at this time
                 
@@ -88,7 +88,7 @@ class AutoHandler:
                 continue
                 
             # RULE 4: Daily Load
-            today_slots = supabase.table("timetable_slots").select("id").eq("faculty_id", fac_id).eq("day", day).execute()
+            today_slots = supabase.table("timetable_slots").select("id").eq("college_id", self.college_id).eq("faculty_id", fac_id).eq("day", day).execute()
             max_classes = faculty.get("max_classes_per_day", 5)
             if len(today_slots.data) >= max_classes:
                 continue
@@ -331,21 +331,21 @@ class AutoHandler:
             "confirmed_at": datetime.utcnow().isoformat(),
             "notified_original": True,
             "notified_substitute": True
-        }).eq("id", sub_id).execute()
+        }).eq("id", sub_id).eq("college_id", self.college_id).execute()
         
         # Update timetable slot (mark as substituted)
         supabase.table("timetable_slots").update({
             "faculty_id": substitute_fid,
             "is_substituted": True
-        }).eq("id", slot_id).execute()
+        }).eq("id", slot_id).eq("college_id", self.college_id).execute()
         
         # Get slot details for notification
-        slot_res = supabase.table("timetable_slots").select("*").eq("id", slot_id).execute()
+        slot_res = supabase.table("timetable_slots").select("*").eq("id", slot_id).eq("college_id", self.college_id).execute()
         slot = slot_res.data[0] if slot_res.data else {}
         
         # Get faculty details
-        orig_res = supabase.table("faculty").select("name, email").eq("id", original_fid).execute()
-        sub_res = supabase.table("faculty").select("name, email").eq("id", substitute_fid).execute()
+        orig_res = supabase.table("faculty").select("name,email,user_id").eq("id", original_fid).eq("college_id", self.college_id).execute()
+        sub_res = supabase.table("faculty").select("name,email,user_id").eq("id", substitute_fid).eq("college_id", self.college_id).execute()
         
         orig_name = orig_res.data[0]["name"] if orig_res.data else "Unknown"
         orig_email = orig_res.data[0].get("email") if orig_res.data else None
@@ -355,7 +355,7 @@ class AutoHandler:
         # Get subject name
         subject_name = "Unknown"
         if slot.get("subject_id"):
-            sub_name_res = supabase.table("subjects").select("name").eq("id", slot["subject_id"]).execute()
+            sub_name_res = supabase.table("subjects").select("name").eq("id", slot["subject_id"]).eq("college_id", self.college_id).execute()
             if sub_name_res.data:
                 subject_name = sub_name_res.data[0]["name"]
         
@@ -402,27 +402,48 @@ VYUHA System
             send_email(sub_email, "Substitution Assignment", message)
         
         # Create in-app notifications
-        orig_user_res = supabase.table("users").select("id").eq("email", orig_email).execute() if orig_email else None
-        sub_user_res = supabase.table("users").select("id").eq("email", sub_email).execute() if sub_email else None
-        orig_users = getattr(orig_user_res, "data", []) if orig_user_res else []
-        sub_users = getattr(sub_user_res, "data", []) if sub_user_res else []
+        # Get user IDs directly from faculty table
+        orig_user_id = orig_res.data[0].get("user_id") if orig_res.data else None
+        sub_user_id = sub_res.data[0].get("user_id") if sub_res.data else None
 
-        for user_data in orig_users:
+        if orig_user_id:
             supabase.table("notifications").insert({
                 "college_id": self.college_id,
-                "user_id": user_data["id"],
+                "user_id": orig_user_id,
                 "type": "substitution",
                 "title": "Substitution Confirmed",
-                "message": f"Your substitution for {date_str} has been confirmed. {sub_name} will take over."
+                "message": f"Your substitution for {date_str} has been confirmed. {sub_name} will take over.",
+                "data": {
+                    "substitution_id": sub_id,
+                    "original_faculty_id": original_fid,
+                    "substitute_faculty_id": substitute_fid,
+                    "timetable_slot_id": slot_id,
+                    "date": date_str,
+                    "subject": subject_name,
+                    "start_time": slot.get("start_time"),
+                    "end_time": slot.get("end_time"),
+                },
+                "is_read": False,
             }).execute()
         
-        for user_data in sub_users:
+        if sub_user_id:
             supabase.table("notifications").insert({
                 "college_id": self.college_id,
-                "user_id": user_data["id"],
+                "user_id": sub_user_id,
                 "type": "substitution",
                 "title": "New Substitution Assignment",
-                "message": f"You have been assigned as substitute for {orig_name} on {date_str}."
+                "message": f"You have been assigned as substitute for {orig_name} on {date_str}.",
+                "data": {
+                    "substitution_id": sub_id,
+                    "original_faculty_id": original_fid,
+                    "substitute_faculty_id": substitute_fid,
+                    "timetable_slot_id": slot_id,
+                    "date": date_str,
+                    "subject": subject_name,
+                    "start_time": slot.get("start_time"),
+                    "end_time": slot.get("end_time"),
+                },
+                "is_read": False,
             }).execute()
         
         # Create audit log

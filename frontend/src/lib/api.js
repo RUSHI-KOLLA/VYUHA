@@ -407,6 +407,18 @@ export const substitutionAPI = {
     const response = await apiClient.get('/substitution/pending');
     return response.data;
   },
+
+  // Get substitutions where current faculty is the substitute
+  getMyAssignments: async () => {
+    const response = await apiClient.get('/substitution/my-assignments');
+    return response.data;
+  },
+
+  // Get substitutions where current faculty's class was covered
+  getMyCovered: async () => {
+    const response = await apiClient.get('/substitution/my-covered');
+    return response.data;
+  },
 };
 
 // ============================================

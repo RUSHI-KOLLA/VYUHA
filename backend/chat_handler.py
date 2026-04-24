@@ -23,9 +23,9 @@ logger = get_logger()
 # or unrelated environment file from another directory.
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
-SAFE_AI_UNAVAILABLE_MESSAGE = (
-    "AI Assistant is unavailable right now. Manual mode is active. "
-    "You can still ask timetable and substitution questions, or enable AI in Settings."
+SAFE_ASSISTANT_FALLBACK_MESSAGE = (
+    "I can help with timetable lookups, substitute suggestions, and replacement notifications. "
+    "Please include a teacher name, day, time, or replacement teacher."
 )
 
 CASUAL_CHAT_PATTERNS = [
@@ -66,7 +66,7 @@ PRONOUN_TOKENS = {
     "him", "her", "his", "hers", "them", "they", "he", "she",
     "that faculty", "this faculty", "that teacher", "this teacher",
     "same faculty", "same teacher", "same professor",
-    "that professor", "this professor",
+    "that professor", "this professor", "it",
 }
 
 SCHEDULE_PATTERNS = [
@@ -82,6 +82,20 @@ SCHEDULE_PATTERNS = [
     r"\btoday\b",
     r"\btomorrow\b",
     r"\byesterday\b",
+    r"\bmonday\b",
+    r"\btuesday\b",
+    r"\bwednesday\b",
+    r"\bthursday\b",
+    r"\bfriday\b",
+    r"\bsaturday\b",
+    r"\bsunday\b",
+    r"\bmon\b",
+    r"\btue\b",
+    r"\bwed\b",
+    r"\bthu\b",
+    r"\bfri\b",
+    r"\bsat\b",
+    r"\bsun\b",
     r"\bconflict(s)?\b",
 ]
 
@@ -319,6 +333,303 @@ async def execute_find_substitute(faculty_name: str, college_id: str):
         return f"Error finding substitutes: {str(e)}"
 
 
+def _normalize_day(day: Optional[str]) -> Optional[str]:
+    if not day:
+        return None
+    day_map = {
+        "monday": "Mon", "tuesday": "Tue", "wednesday": "Wed",
+        "thursday": "Thu", "friday": "Fri", "saturday": "Sat", "sunday": "Sun",
+        "mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu",
+        "fri": "Fri", "sat": "Sat", "sun": "Sun",
+    }
+    return day_map.get(str(day).strip().lower(), str(day).strip())
+
+
+def _date_for_slot_day(day: Optional[str], preferred_date: Optional[str] = None) -> str:
+    if preferred_date:
+        return preferred_date
+    normalized_day = _normalize_day(day)
+    today = datetime.datetime.now().date()
+    if not normalized_day:
+        return today.isoformat()
+
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    try:
+        target = days.index(normalized_day)
+    except ValueError:
+        return today.isoformat()
+    delta = (target - today.weekday()) % 7
+    return (today + datetime.timedelta(days=delta)).isoformat()
+
+
+def _format_time(value: Any) -> str:
+    text = str(value or "")
+    return text[:5] if len(text) >= 5 else text
+
+
+def _normalize_faculty_query(value: str) -> str:
+    """Normalize user-facing faculty references like 'professor redev' or 'ID: EMB005'."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"^(?:faculty|teacher|professor|prof|dr|mr|mrs|ms)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(
+        r"^(?:employee\s*id|emp\s*id|id|employee|emp|code)\s*[:\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if ":" in text:
+        prefix, remainder = text.split(":", 1)
+        if re.search(r"\b(?:id|employee\s*id|emp\s*id|emp|code)\b", prefix, re.IGNORECASE):
+            text = remainder.strip()
+
+    return text.rstrip("?.!,").strip()
+
+
+def _find_faculty_by_name(college_id: str, faculty_name: str) -> Optional[Dict[str, Any]]:
+    if not faculty_name or not supabase:
+        return None
+    normalized = _normalize_faculty_query(faculty_name)
+    if not normalized:
+        return None
+    exact_res = (
+        supabase.table("faculty")
+        .select("*")
+        .eq("college_id", college_id)
+        .ilike("employee_id", normalized)
+        .limit(1)
+        .execute()
+    )
+    if exact_res.data:
+        return exact_res.data[0]
+    name_res = (
+        supabase.table("faculty")
+        .select("*")
+        .eq("college_id", college_id)
+        .ilike("name", f"%{normalized}%")
+        .limit(1)
+        .execute()
+    )
+    if name_res.data:
+        return name_res.data[0]
+    res = (
+        supabase.table("faculty")
+        .select("*")
+        .eq("college_id", college_id)
+        .ilike("employee_id", f"%{normalized}%")
+        .limit(1)
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
+def _extract_faculty_names_from_message(message: str, college_id: str) -> List[str]:
+    if not supabase:
+        return []
+    try:
+        faculty_res = supabase.table("faculty").select("name").eq("college_id", college_id).execute()
+        names = []
+        normalized = re.sub(r"\s+", " ", message or "")
+        for faculty in faculty_res.data or []:
+            name = str(faculty.get("name") or "").strip()
+            if name and re.search(rf"\b{re.escape(name)}\b", normalized, re.IGNORECASE):
+                names.append(name)
+        return names
+    except Exception as exc:
+        logger.warning("Faculty name extraction failed: %s", exc)
+        return []
+
+
+def _is_replacement_notification_request(message: str) -> bool:
+    lowered = (message or "").lower()
+    has_action = any(token in lowered for token in ["notify", "notification", "send", "assign", "confirm", "email", "mail"])
+    has_replacement = any(token in lowered for token in ["replacement", "substitute", "substitution", "cover"])
+    return has_action and has_replacement
+
+
+def _resolve_replacement_request(
+    message: str,
+    college_id: str,
+    context: Optional[Dict[str, Any]],
+    history: Optional[List[Dict[str, Any]]],
+    memory_facts: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    entities = _extract_query_entities(message, college_id)
+    relative_date = _resolve_relative_date(message)
+
+    absent_faculty = ""
+    if context and isinstance(context, dict):
+        absent_faculty = (
+            str(context.get("substitution_faculty") or "").strip()
+            or str(context.get("last_referenced_faculty") or "").strip()
+        )
+    if not absent_faculty:
+        absent_fact = (memory_facts or {}).get("substitution_faculty") or {}
+        absent_faculty = str(absent_fact.get("name") or "").strip()
+    if not absent_faculty:
+        absent_faculty = _extract_recent_absent_faculty(history) or ""
+
+    names_in_message = _extract_faculty_names_from_message(message, college_id)
+    if not absent_faculty and len(names_in_message) >= 2:
+        # "Assign Kumar as replacement for Sharma" means Kumar is the replacement.
+        absent_faculty = names_in_message[1]
+
+    substitute_name = ""
+    for name in names_in_message:
+        if absent_faculty and name.lower() == absent_faculty.lower():
+            continue
+        substitute_name = name
+        break
+
+    if not substitute_name and context and isinstance(context, dict):
+        targets = context.get("substitution_targets") or []
+        if isinstance(targets, list) and targets:
+            substitute_name = str(targets[0]).strip()
+    if not substitute_name:
+        targets_fact = (memory_facts or {}).get("substitution_targets") or {}
+        targets = targets_fact.get("names") or []
+        if targets:
+            substitute_name = str(targets[0]).strip()
+    if not substitute_name:
+        recent_targets = _extract_recent_substitution_targets(history)
+        if recent_targets:
+            substitute_name = recent_targets[0]
+
+    return {
+        "absent_faculty": absent_faculty,
+        "substitute_name": substitute_name,
+        "day": entities.get("day"),
+        "time_slot": entities.get("time_slot"),
+        "date": relative_date,
+    }
+
+
+async def execute_replacement_notification(
+    college_id: str,
+    absent_faculty_name: str,
+    substitute_name: str,
+    current_user: Dict[str, Any],
+    day: Optional[str] = None,
+    time_slot: Optional[str] = None,
+    date_value: Optional[str] = None,
+) -> str:
+    """Create confirmed substitution records and notify the replacement faculty."""
+    try:
+        absent = _find_faculty_by_name(college_id, absent_faculty_name)
+        substitute = _find_faculty_by_name(college_id, substitute_name)
+        if not absent:
+            return f"I could not find the absent faculty '{absent_faculty_name}'."
+        if not substitute:
+            return f"I could not find the replacement teacher '{substitute_name}'."
+        if absent["id"] == substitute["id"]:
+            return "The absent faculty and replacement teacher cannot be the same person."
+
+        normalized_day = _normalize_day(day)
+        if date_value:
+            try:
+                normalized_day = datetime.datetime.strptime(date_value, "%Y-%m-%d").strftime("%a")
+            except ValueError:
+                pass
+
+        query = (
+            supabase.table("timetable_slots")
+            .select("*")
+            .eq("college_id", college_id)
+            .eq("faculty_id", absent["id"])
+        )
+        if normalized_day:
+            query = query.eq("day", normalized_day)
+        if time_slot:
+            formatted_time = time_slot if ":" in time_slot and len(time_slot) == 8 else f"{time_slot}:00" if len(time_slot) == 5 else time_slot
+            query = query.eq("start_time", formatted_time)
+
+        slots = query.order("day").order("start_time").execute().data or []
+        if not slots:
+            day_text = f" on {normalized_day}" if normalized_day else ""
+            return f"No timetable slots found for {absent['name']}{day_text}."
+
+        handler = AutoHandler(college_id)
+        assigned = []
+        skipped = []
+        for slot in slots[:6]:
+            candidates = handler.find_substitutes_for_slot(slot)
+            candidate_ids = {candidate["faculty_id"] for candidate in candidates}
+            if substitute["id"] not in candidate_ids:
+                skipped.append(f"{slot['day']} {_format_time(slot.get('start_time'))}: {substitute['name']} is not available/eligible")
+                continue
+
+            assignment_date = _date_for_slot_day(slot.get("day"), date_value)
+            existing_res = (
+                supabase.table("substitutions")
+                .select("*")
+                .eq("college_id", college_id)
+                .eq("timetable_slot_id", slot["id"])
+                .eq("date", assignment_date)
+                .in_("status", ["pending", "confirmed"])
+                .limit(1)
+                .execute()
+            )
+            if existing_res.data:
+                substitution = existing_res.data[0]
+                supabase.table("substitutions").update({
+                    "substitute_faculty_id": substitute["id"],
+                    "status": "pending",
+                    "auto_assigned": True,
+                }).eq("id", substitution["id"]).execute()
+                substitution["substitute_faculty_id"] = substitute["id"]
+                substitution["status"] = "pending"
+            else:
+                inserted = supabase.table("substitutions").insert({
+                    "college_id": college_id,
+                    "leave_request_id": None,
+                    "original_faculty_id": absent["id"],
+                    "substitute_faculty_id": substitute["id"],
+                    "timetable_slot_id": slot["id"],
+                    "date": assignment_date,
+                    "status": "pending",
+                    "priority": 1,
+                    "auto_assigned": True,
+                }).execute()
+                substitution = inserted.data[0] if inserted.data else None
+
+            if not substitution:
+                skipped.append(f"{slot['day']} {_format_time(slot.get('start_time'))}: could not create assignment")
+                continue
+
+            substitution["confirmed_by"] = current_user.get("id")
+            result = handler.process_substitution_confirmation(substitution)
+            if result.get("success"):
+                assigned.append(f"{slot['day']} {_format_time(slot.get('start_time'))}-{_format_time(slot.get('end_time'))}")
+            else:
+                skipped.append(f"{slot['day']} {_format_time(slot.get('start_time'))}: notification failed")
+
+        if not assigned:
+            detail = "\n".join(f"- {item}" for item in skipped[:5])
+            return f"I could not assign {substitute['name']} as replacement for {absent['name']}.\n{detail}".strip()
+
+        response = [
+            f"Replacement assigned: **{substitute['name']}** will cover **{absent['name']}**.",
+            "Notifications were sent and the assignment is visible in the teacher dashboard.",
+            "Covered slots:",
+        ]
+        response.extend(f"- {item}" for item in assigned)
+        if skipped:
+            response.append("Skipped slots:")
+            response.extend(f"- {item}" for item in skipped[:5])
+        return "\n".join(response)
+    except Exception as exc:
+        logger.warning("Replacement notification failed: %s", exc)
+        return f"I could not complete the replacement notification: {str(exc)}"
+
+
 async def execute_substitute_for_faculty_schedule(
     college_id: str,
     faculty_name: str,
@@ -390,9 +701,25 @@ async def execute_query_timetable(college_id: str, day: Optional[str] = None, ti
         # Step 1: Resolve IDs from Names if provided
         fac_id = None
         if faculty_name:
-            res = supabase.table("faculty").select("id").eq("college_id", college_id).ilike("name", f"%{faculty_name}%").execute()
-            if res.data: 
-                fac_id = res.data[0]["id"]
+            faculty_res = (
+                supabase.table("faculty")
+                .select("id,name,employee_id")
+                .eq("college_id", college_id)
+                .eq("employee_id", faculty_name)
+                .limit(1)
+                .execute()
+            )
+            if not faculty_res.data:
+                faculty_res = (
+                    supabase.table("faculty")
+                    .select("id,name,employee_id")
+                    .eq("college_id", college_id)
+                    .ilike("name", f"%{faculty_name}%")
+                    .limit(1)
+                    .execute()
+                )
+            if faculty_res.data:
+                fac_id = faculty_res.data[0]["id"]
             else:
                 return f"Could not find any teacher matching '{faculty_name}'."
             
@@ -468,12 +795,29 @@ def _resolve_relative_date(message: str):
         return (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
     if "yesterday" in lowered:
         return (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # Handle day names (find next occurrence of the day)
+    day_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+        "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
+    }
+    for token, target_weekday in day_map.items():
+        if re.search(rf"\b{re.escape(token)}\b", lowered):
+            days_ahead = target_weekday - now.weekday()
+            if days_ahead <= 0: # Target day already happened this week or is today
+                days_ahead += 7
+            return (now + datetime.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
     return None
 
 
-async def execute_substitution_for_date(college_id: str, date_str: str):
+async def execute_substitution_for_date(college_id: str, date_str: str, faculty_name: str = None):
     """Return deterministic substitute suggestions for leave requests on a given date."""
     try:
+        requested_faculty = _find_faculty_by_name(college_id, faculty_name) if faculty_name else None
+        if faculty_name and not requested_faculty:
+            return f"I couldn't find a teacher named '{faculty_name}' in the database."
+
         leave_res = (
             supabase.table("leave_requests")
             .select("*")
@@ -484,10 +828,15 @@ async def execute_substitution_for_date(college_id: str, date_str: str):
             .execute()
         )
         leaves = leave_res.data or []
+        if requested_faculty:
+            leaves = [leave for leave in leaves if leave.get("faculty_id") == requested_faculty["id"]]
 
-        if not leaves:
-            # IMPROVEMENT: If no leaves found, don't just stop. Check for faculty in context.
-            return f"I didn't find any formal leave requests for {date_str}. However, you can ask for a specific teacher like 'Find substitute for Dr. Smith {date_str}' and I will find replacements for their entire schedule."
+        if not leaves and not faculty_name:
+            return f"Tell me which teacher needs a substitute for {date_str}."
+        
+        # If we have a faculty name but no formal leave, create a virtual leave context.
+        if not leaves and faculty_name:
+            leaves = [{"faculty_id": requested_faculty["id"], "leave_date": date_str, "status": "virtual"}]
 
         handler = AutoHandler(college_id)
 
@@ -506,6 +855,7 @@ async def execute_substitution_for_date(college_id: str, date_str: str):
                 continue
 
             lines.append(f"- Absent faculty: {leave_label}")
+
             for slot in slots[:4]:
                 substitutes = handler.find_substitutes_for_slot(slot)
                 if not substitutes:
@@ -547,7 +897,7 @@ def _get_ai_chat_enabled(college_id: str) -> bool:
     return default_enabled
 
 
-def _extract_query_entities(message: str):
+def _extract_query_entities(message: str, college_id: str = None):
     """Lightweight parsing for manual mode so the assistant remains useful without AI."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.lower()
@@ -579,18 +929,61 @@ def _extract_query_entities(message: str):
     room_name = None
     subject_name = None
 
-    faculty_patterns = [
-        r"(?:for|of|teacher|faculty|professor|mr|mrs|ms|dr)\s+([A-Za-z0-9][A-Za-z0-9 .'-]{0,80})",
-        r"(?:find|show|check)\s+(?:schedule|timetable|substitute)\s+for\s+([A-Za-z0-9][A-Za-z0-9 .'-]{0,80})",
-    ]
-    for pattern in faculty_patterns:
-        match = re.search(pattern, normalized, re.IGNORECASE)
-        if match:
-            faculty_name = match.group(1).strip().rstrip("?.!,")
-            break
+    # NEW: Direct Faculty Name Lookup (Bulletproof)
+    # We scan the message for any faculty name that exists in the database for this college
+    try:
+        if supabase and college_id:
+            all_fac_res = supabase.table("faculty").select("id, name").eq("college_id", college_id).execute()
+        else:
+            all_fac_res = None
+        if all_fac_res and all_fac_res.data:
+            # First pass: Exact full name match (highest priority)
+            for fac in all_fac_res.data:
+                name = str(fac.get("name") or "").strip()
+                if not name: continue
+                if re.search(rf"\b{re.escape(name)}\b", normalized, re.IGNORECASE):
+                    faculty_name = name
+                    break
+            
+            # Second pass: Partial name match (significant parts)
+            if not faculty_name:
+                for fac in all_fac_res.data:
+                    full_name = str(fac.get("name") or "").strip()
+                    if not full_name: continue
+                    # Split name into parts, ignore very short ones (<=2 chars)
+                    parts = [p for p in re.split(r"[ .'-]+", full_name) if len(p) >= 3]
+                    for part in parts:
+                        if re.search(rf"\b{re.escape(part)}\b", normalized, re.IGNORECASE):
+                            faculty_name = full_name
+                            break
+                    if faculty_name:
+                        break
+    except Exception as e:
+        logger.warning("Direct faculty lookup failed: %s", e)
+
+    # Fallback to regex if direct lookup didn't work (for new/unloaded names)
+    if not faculty_name:
+        faculty_patterns = [
+            r"(?:for|of|teacher|faculty|professor|mr|mrs|ms|dr|replace|substitute|cover|with|to)\s+([A-Za-z0-9][A-Za-z0-9 .'-]{0,80})",
+            r"(?:find|show|check|get)\s+(?:schedule|timetable|substitute|replacement)\s+(?:for|of)?\s+([A-Za-z0-9][A-Za-z0-9 .'-]{0,80})",
+            r"([A-Za-z0-9]{3,20})\s+(?:timetable|schedule|substitute|replacement|replace)",
+            r"(?:timetable|schedule|substitute|replacement|replace|cover)\s+(?:of|for)?\s*([A-Za-z0-9]{3,20})",
+            r"who\s+(?:can|will)\s+(?:replace|cover|substitute)\s+([A-Za-z0-9][A-Za-z0-9 .'-]{0,80})",
+        ]
+        for pattern in faculty_patterns:
+            match = re.search(pattern, normalized, re.IGNORECASE)
+            if match:
+                faculty_name = match.group(1).strip().rstrip("?.!,")
+                break
 
     # Guard: avoid treating temporal phrases (e.g., "for tomorrow") as faculty names.
     if faculty_name:
+        faculty_name = re.sub(
+            r"^(?:faculty|teacher|professor|prof|mr|mrs|ms|dr)\s+",
+            "",
+            faculty_name.strip(),
+            flags=re.IGNORECASE,
+        ).strip()
         fac_lower = faculty_name.lower()
         day_tokens = set(day_map.keys()) | {
             "today",
@@ -730,7 +1123,12 @@ def _resolve_pronoun_to_faculty(
     return _extract_recent_faculty_reference(history)
 
 
-def _classify_chat_intent(message: str, history: Optional[List[dict]] = None, context: Optional[dict] = None) -> str:
+def _classify_chat_intent(
+    message: str,
+    college_id: str,
+    history: Optional[List[dict]] = None,
+    context: Optional[dict] = None,
+) -> str:
     lowered = (message or "").lower().strip()
     if _is_followup_availability_question(message):
         return "substitution"
@@ -742,7 +1140,7 @@ def _classify_chat_intent(message: str, history: Optional[List[dict]] = None, co
     if _message_contains_pronoun_reference(message) and _has_recent_substitution_intent(history, context):
         return "substitution"
     if any(re.search(pattern, lowered, re.IGNORECASE) for pattern in SCHEDULE_PATTERNS):
-        if _has_recent_substitution_intent(history, context):
+        if _has_substitution_context(message, history, context, college_id):
             return "substitution"
         return "schedule"
     return "general"
@@ -760,8 +1158,8 @@ def _is_followup_availability_question(message: str) -> bool:
     )
 
 
-def _has_substitution_context(message: str, history: Optional[List[dict]], context: Optional[dict]) -> bool:
-    entities = _extract_query_entities(message)
+def _has_substitution_context(message: str, history: Optional[List[dict]], context: Optional[dict], college_id: str = None) -> bool:
+    entities = _extract_query_entities(message, college_id)
     if entities.get("faculty_name") or entities.get("day") or entities.get("time_slot"):
         return True
 
@@ -892,7 +1290,7 @@ def _extract_recent_absent_faculty(history: Optional[List[dict]]) -> Optional[st
         content = str(turn.get("content", "") or "")
         if not any(re.search(pattern, content, re.IGNORECASE) for pattern in SUBSTITUTION_PATTERNS):
             continue
-        entities = _extract_query_entities(content)
+        entities = _extract_query_entities(content, None)
         if entities.get("faculty_name"):
             return entities["faculty_name"]
 
@@ -911,7 +1309,7 @@ def _extract_recent_faculty_reference(history: Optional[List[dict]]) -> Optional
         if str(turn.get("role", "")).lower() != "user":
             continue
         content = str(turn.get("content", "") or "")
-        entities = _extract_query_entities(content)
+        entities = _extract_query_entities(content, None)
         faculty_name = str(entities.get("faculty_name") or "").strip()
         if faculty_name:
             return faculty_name
@@ -992,8 +1390,13 @@ async def _manual_assistant_response(
     )
 
     if is_substitution_query:
-        entities = _extract_query_entities(message)
+        entities = _extract_query_entities(message, college_id)
         relative_date = _resolve_relative_date(message)
+        if relative_date:
+            try:
+                entities["day"] = datetime.datetime.strptime(relative_date, "%Y-%m-%d").strftime("%a")
+            except ValueError:
+                pass
         if not entities.get("faculty_name"):
             context_faculty = ""
             if context and isinstance(context, dict):
@@ -1019,12 +1422,12 @@ async def _manual_assistant_response(
         if relative_date:
             return await execute_substitution_for_date(college_id, relative_date)
         return (
-            "Manual mode is active. Tell me the faculty name, or ask by date, for example: "
+            "Tell me the faculty name, or ask by date. Example: "
             "\"Find a substitute for Dr. Sharma\" or \"Find a substitute for tomorrow\"."
         )
 
     if is_schedule_query:
-        entities = _extract_query_entities(message)
+        entities = _extract_query_entities(message, college_id)
         # Resolve pronouns ("his schedule", "her schedule") to the actual faculty
         if not entities.get("faculty_name") and _message_contains_pronoun_reference(message):
             resolved = _resolve_pronoun_to_faculty(message, context, history, memory_facts)
@@ -1033,26 +1436,32 @@ async def _manual_assistant_response(
         if any(entities.values()):
             return await execute_query_timetable(college_id, **entities)
         return (
-            "Manual mode is active. Ask with a day, room, subject, or teacher name, "
+            "Ask with a day, room, subject, or teacher name, "
             "for example: \"Show me today's schedule\"."
         )
 
     if any(keyword in lowered for keyword in ["email", "notify", "send mail", "send email"]):
         return (
-            "Manual mode is active. Email actions are available when AI Assistant is enabled."
+            "I can send replacement notifications when you include the absent teacher and replacement teacher."
         )
 
-    return SAFE_AI_UNAVAILABLE_MESSAGE
+    return SAFE_ASSISTANT_FALLBACK_MESSAGE
 
 
 def _infer_substitution_action(
     message: str,
+    college_id: str,
     context: Optional[Dict[str, Any]],
     history: Optional[List[Dict[str, Any]]],
     memory_facts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    entities = _extract_query_entities(message)
+    entities = _extract_query_entities(message, college_id)
     relative_date = _resolve_relative_date(message)
+    if relative_date:
+        try:
+            entities["day"] = datetime.datetime.strptime(relative_date, "%Y-%m-%d").strftime("%a")
+        except ValueError:
+            pass
     inferred = False
     confidence = 0.45
 
@@ -1116,6 +1525,11 @@ async def _execute_confirmed_action(action_type: str, params: Dict[str, Any], co
                 "I still need a faculty name or explicit date. "
                 "Example: 'Find a substitute for Dr. Sharma tomorrow'."
             )
+        if date_value and not day:
+            try:
+                day = datetime.datetime.strptime(date_value, "%Y-%m-%d").strftime("%a")
+            except ValueError:
+                pass
         if day or time_slot:
             return await execute_substitute_for_faculty_schedule(
                 college_id,
@@ -1153,7 +1567,7 @@ async def call_groq(
     groq_api_key = _get_groq_api_key()
     if not groq_api_key:
         logger.warning("GROQ_API_KEY is missing or empty; falling back to manual mode.")
-        return SAFE_AI_UNAVAILABLE_MESSAGE
+        return SAFE_ASSISTANT_FALLBACK_MESSAGE
         
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -1253,7 +1667,7 @@ async def call_groq(
                         return f"✅ Action Executed: I have successfully emailed **{args['teacher_email']}** regarding '{args['subject']}'!"
                     elif tool_call["function"]["name"] == "find_substitute":
                         args = json.loads(tool_call["function"]["arguments"])
-                        entities = _extract_query_entities(user_prompt)
+                        entities = _extract_query_entities(user_prompt, college_id)
                         if entities.get("day") or entities.get("time_slot"):
                             return await execute_substitute_for_faculty_schedule(
                                 college_id,
@@ -1263,6 +1677,10 @@ async def call_groq(
                             )
                         resolved_day = _resolve_relative_date(user_prompt)
                         if resolved_day:
+                            try:
+                                resolved_day = datetime.datetime.strptime(resolved_day, "%Y-%m-%d").strftime("%a")
+                            except ValueError:
+                                pass
                             return await execute_substitute_for_faculty_schedule(
                                 college_id,
                                 args["faculty_name"],
@@ -1279,18 +1697,18 @@ async def call_groq(
             error_detail = e.response.text[:200] if e.response else "Unknown"
             logger.warning("Groq HTTP error: %s", error_detail)
             if e.response and e.response.status_code == 429:
-                return "AI Assistant is busy right now. Manual mode is still available."
+                return SAFE_ASSISTANT_FALLBACK_MESSAGE
             if e.response and e.response.status_code in (401, 403):
-                return SAFE_AI_UNAVAILABLE_MESSAGE
+                return SAFE_ASSISTANT_FALLBACK_MESSAGE
             if e.response and e.response.status_code == 503:
-                return "AI Assistant is temporarily unavailable. Manual mode is still available."
-            return SAFE_AI_UNAVAILABLE_MESSAGE
+                return SAFE_ASSISTANT_FALLBACK_MESSAGE
+            return SAFE_ASSISTANT_FALLBACK_MESSAGE
         except httpx.TimeoutException:
             logger.warning("Groq API timed out")
-            return "AI Assistant timed out. Manual mode is still available."
+            return SAFE_ASSISTANT_FALLBACK_MESSAGE
         except Exception as e:
             logger.warning("Error calling AI: %s", e)
-            return SAFE_AI_UNAVAILABLE_MESSAGE
+            return SAFE_ASSISTANT_FALLBACK_MESSAGE
 
 @router.post("/session")
 async def create_chat_session(
@@ -1386,7 +1804,7 @@ async def chat_interaction(
         merged_context = _merge_chat_context(request.context, memory_facts)
 
         _persist_chat_message(session_id, college_id, user_id, "user", request.message, intent="incoming")
-        incoming_entities = _extract_query_entities(request.message)
+        incoming_entities = _extract_query_entities(request.message, college_id)
         incoming_faculty_name = str(incoming_entities.get("faculty_name") or "").strip()
 
         # Also resolve pronouns for memory saving — ensures faculty reference persists
@@ -1426,13 +1844,13 @@ async def chat_interaction(
                 "mode": ui_mode,
                 "execution_mode": "manual",
                 "ai_enabled": ai_available,
-                "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+                "warning": None,
                 "intent": "substitution",
                 "needs_confirmation": False,
                 "proposed_actions": [],
             }
 
-        intent = _classify_chat_intent(request.message, merged_history, merged_context)
+        intent = _classify_chat_intent(request.message, college_id, merged_history, merged_context)
 
         if intent == "casual":
             response_text = _casual_chat_reply(request.message)
@@ -1443,7 +1861,7 @@ async def chat_interaction(
                 "mode": ui_mode,
                 "execution_mode": "manual",
                 "ai_enabled": ai_available,
-                "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+                "warning": None,
                 "intent": "casual",
                 "needs_confirmation": False,
                 "proposed_actions": [],
@@ -1506,7 +1924,43 @@ async def chat_interaction(
         """
 
         if intent == "substitution":
-            inferred_action = _infer_substitution_action(request.message, merged_context, merged_history, memory_facts)
+            if _is_replacement_notification_request(request.message):
+                notify_params = _resolve_replacement_request(
+                    request.message,
+                    college_id,
+                    merged_context,
+                    merged_history,
+                    memory_facts,
+                )
+                if not notify_params.get("absent_faculty") or not notify_params.get("substitute_name"):
+                    response_text = (
+                        "Tell me both teachers for the replacement. Example: "
+                        "'Assign Prof. Kumar as replacement for Prof. Sharma tomorrow'."
+                    )
+                else:
+                    response_text = await execute_replacement_notification(
+                        college_id,
+                        notify_params["absent_faculty"],
+                        notify_params["substitute_name"],
+                        current_user,
+                        day=notify_params.get("day"),
+                        time_slot=notify_params.get("time_slot"),
+                        date_value=notify_params.get("date"),
+                    )
+                _persist_chat_message(session_id, college_id, user_id, "assistant", response_text, intent="substitution")
+                return {
+                    "session_id": session_id,
+                    "response": response_text,
+                    "mode": ui_mode,
+                    "execution_mode": "manual",
+                    "ai_enabled": ai_available,
+                    "warning": None,
+                    "intent": "substitution",
+                    "needs_confirmation": False,
+                    "proposed_actions": [],
+                }
+
+            inferred_action = _infer_substitution_action(request.message, college_id, merged_context, merged_history, memory_facts)
             params = inferred_action["params"]
             confidence = float(inferred_action["confidence"])
             if not params.get("faculty_name") and not params.get("date"):
@@ -1521,7 +1975,7 @@ async def chat_interaction(
                     "mode": ui_mode,
                     "execution_mode": "manual",
                     "ai_enabled": ai_available,
-                    "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+                    "warning": None, # SILENCED
                     "intent": "substitution",
                     "needs_confirmation": False,
                     "proposed_actions": [],
@@ -1544,7 +1998,7 @@ async def chat_interaction(
                     "mode": ui_mode,
                     "execution_mode": "manual",
                     "ai_enabled": ai_available,
-                    "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+                    "warning": None, # SILENCED
                     "intent": "substitution",
                     "needs_confirmation": False,
                     "proposed_actions": [],
@@ -1595,7 +2049,7 @@ async def chat_interaction(
                 "mode": ui_mode,
                 "execution_mode": "manual",
                 "ai_enabled": ai_available,
-                "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+                "warning": None, # SILENCED
                 "intent": "substitution",
                 "needs_confirmation": False,
                 "proposed_actions": [],
@@ -1605,31 +2059,22 @@ async def chat_interaction(
         # Substitution is always deterministic to avoid model hallucinating faculty names.
         if intent == "schedule":
             # Pre-resolve pronouns for schedule queries (e.g. "get his schedule")
-            schedule_entities = _extract_query_entities(request.message)
+            schedule_entities = _extract_query_entities(request.message, college_id)
             if not schedule_entities.get("faculty_name") and _message_contains_pronoun_reference(request.message):
                 resolved_fac = _resolve_pronoun_to_faculty(request.message, merged_context, merged_history, memory_facts)
                 if resolved_fac:
                     schedule_entities["faculty_name"] = resolved_fac
-
-            if ai_available:
-                ai_response = await call_groq(system_prompt, request.message, college_id, include_tools=True, history=merged_history)
-                execution_mode = "manual" if _is_manual_fallback_message(ai_response) else "ai"
-                # Fallback: if Groq failed, try deterministic manual handler instead of showing error
-                if _is_manual_fallback_message(ai_response) and any(schedule_entities.values()):
-                    ai_response = await execute_query_timetable(college_id, **schedule_entities)
-                    execution_mode = "manual"
+            if any(schedule_entities.values()):
+                ai_response = await execute_query_timetable(college_id, **schedule_entities)
             else:
-                if any(schedule_entities.values()):
-                    ai_response = await execute_query_timetable(college_id, **schedule_entities)
-                else:
-                    ai_response = await _manual_assistant_response(
-                        request.message,
-                        college_id,
-                        history=merged_history,
-                        context=merged_context,
-                        memory_facts=memory_facts,
-                    )
-                execution_mode = "manual"
+                ai_response = await _manual_assistant_response(
+                    request.message,
+                    college_id,
+                    history=merged_history,
+                    context=merged_context,
+                    memory_facts=memory_facts,
+                )
+            execution_mode = "manual"
         else:
             # General chat: allow AI if available, but never expose tool-calling.
             if ai_available:
@@ -1652,7 +2097,7 @@ async def chat_interaction(
             "mode": ui_mode,
             "execution_mode": execution_mode,
             "ai_enabled": ai_available,
-            "warning": None if ai_available else SAFE_AI_UNAVAILABLE_MESSAGE,
+            "warning": None,
             "intent": intent,
             "needs_confirmation": False,
             "proposed_actions": [],

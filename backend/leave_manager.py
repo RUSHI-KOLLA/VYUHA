@@ -88,7 +88,13 @@ async def get_all_leaves(
         query = supabase.table("leave_requests").select("*").eq("college_id", college_id)
         
         if current_user.get("role") not in ["admin", "principal", "superadmin"]:
+            # Try by user_id first
             fac_res = supabase.table("faculty").select("id").eq("user_id", current_user["id"]).execute()
+            
+            # Fallback to email if user_id is not linked
+            if not fac_res.data and current_user.get("email"):
+                fac_res = supabase.table("faculty").select("id").ilike("email", current_user["email"]).execute()
+                
             if not fac_res.data:
                 return {"leaves": []}
             query = query.eq("faculty_id", fac_res.data[0]["id"])
@@ -164,7 +170,26 @@ async def approve_leave(
             "entity_id": leave_id,
             "new_value": {"status": "approved"}
         }).execute()
-        
+
+        # NEW: Create notification for the teacher
+        # Get faculty info to find the user_id
+        leave_res = supabase.table("leave_requests").select("faculty_id").eq("id", leave_id).execute()
+        if leave_res.data:
+            faculty_id = leave_res.data[0]["faculty_id"]
+            faculty_res = supabase.table("faculty").select("user_id, name").eq("id", faculty_id).execute()
+            if faculty_res.data and faculty_res.data[0].get("user_id"):
+                teacher_user_id = faculty_res.data[0]["user_id"]
+                teacher_name = faculty_res.data[0]["name"]
+                
+                supabase.table("notifications").insert({
+                    "college_id": college_id,
+                    "user_id": teacher_user_id,
+                    "type": "leave_approved",
+                    "title": "Leave Approved",
+                    "message": f"Hello {teacher_name}, your leave request for {leave_id} has been approved.",
+                    "is_read": False
+                }).execute()
+
         return {"message": "Leave approved successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error approving leave: {str(e)}")
@@ -197,7 +222,25 @@ async def reject_leave(
             "entity_id": leave_id,
             "new_value": {"status": "rejected", "reason": reason}
         }).execute()
-        
+
+        # NEW: Create notification for the teacher
+        leave_res = supabase.table("leave_requests").select("faculty_id").eq("id", leave_id).execute()
+        if leave_res.data:
+            faculty_id = leave_res.data[0]["faculty_id"]
+            faculty_res = supabase.table("faculty").select("user_id, name").eq("id", faculty_id).execute()
+            if faculty_res.data and faculty_res.data[0].get("user_id"):
+                teacher_user_id = faculty_res.data[0]["user_id"]
+                teacher_name = faculty_res.data[0]["name"]
+                
+                supabase.table("notifications").insert({
+                    "college_id": college_id,
+                    "user_id": teacher_user_id,
+                    "type": "leave_rejected",
+                    "title": "Leave Rejected",
+                    "message": f"Hello {teacher_name}, your leave request has been rejected. Reason: {reason or 'Not specified'}",
+                    "is_read": False
+                }).execute()
+
         return {"message": "Leave rejected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error rejecting leave: {str(e)}")

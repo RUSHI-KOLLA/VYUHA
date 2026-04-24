@@ -17,7 +17,6 @@ import {
   getFeatureFlags,
   createChatSession,
   getChatSessionMessages,
-  confirmChatAction,
 } from '../lib/api';
 import './ChatAssistant.css';
 
@@ -35,11 +34,9 @@ const ChatAssistant = () => {
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [assistantMode, setAssistantMode] = useState('manual');
-  const [assistantNotice, setAssistantNotice] = useState('');
   const [substitutionTargets, setSubstitutionTargets] = useState([]);
   const [substitutionFaculty, setSubstitutionFaculty] = useState('');
   const [sessionId, setSessionId] = useState('');
-  const [pendingAction, setPendingAction] = useState(null);
   const messagesEndRef = useRef(null);
   const navigate = useNavigate();
 
@@ -57,11 +54,9 @@ const ChatAssistant = () => {
         const flags = await getFeatureFlags();
         const aiEnabled = flags?.ai_chat !== false;
         setAssistantMode(aiEnabled ? 'ai' : 'manual');
-        setAssistantNotice(aiEnabled ? '' : 'Manual mode is active. Enable AI Assistant in Settings if you want Groq-powered replies.');
       } catch (err) {
         console.error('Error loading feature flags:', err);
         setAssistantMode('manual');
-        setAssistantNotice('Manual mode is active. AI Assistant settings could not be loaded.');
       }
     };
 
@@ -113,7 +108,6 @@ const ChatAssistant = () => {
     setMessages(prev => [...prev, userMessage]);
     setInputMessage('');
     setIsTyping(true);
-    setPendingAction(null);
 
     try {
       // Connect to real backend response
@@ -139,7 +133,6 @@ const ChatAssistant = () => {
           : response.mode === 'ai';
       const responseMode = response.mode || (aiAvailable ? 'ai' : 'manual');
       setAssistantMode(responseMode === 'ai' ? 'ai' : 'manual');
-      setAssistantNotice(response.warning || (aiAvailable ? '' : 'Manual mode is active. AI can be re-enabled in Settings.'));
 
       if (typeof replyContent === 'string' && /substitute|absent faculty/i.test(replyContent)) {
         const nextTargets = extractSubstitutionTargets(replyContent);
@@ -152,12 +145,6 @@ const ChatAssistant = () => {
         }
       }
 
-      if (response.needs_confirmation && Array.isArray(response.proposed_actions) && response.proposed_actions.length > 0) {
-        setPendingAction(response.proposed_actions[0]);
-      } else {
-        setPendingAction(null);
-      }
-      
       setMessages(prev => [...prev, {
         id: prev.length + 1,
         type: 'bot',
@@ -167,41 +154,12 @@ const ChatAssistant = () => {
     } catch (error) {
       console.error('Chat error:', error);
       setAssistantMode('manual');
-      setAssistantNotice('Manual mode is active. The AI backend is unavailable right now.');
       setSubstitutionTargets([]);
-      setPendingAction(null);
       setMessages(prev => [...prev, {
         id: prev.length + 1,
         type: 'bot',
-        content: 'AI Assistant is unavailable right now. Manual mode is active. You can still use the timetable and substitution tools.',
+        content: 'I could not process that request. Try again with a teacher name, day, time, or replacement teacher.',
         timestamp: new Date()
-      }]);
-    } finally {
-      setIsTyping(false);
-    }
-  };
-
-  const handleConfirmPendingAction = async () => {
-    if (!pendingAction || !sessionId) return;
-    setIsTyping(true);
-    try {
-      const result = await confirmChatAction(sessionId, pendingAction.type, pendingAction.params || {});
-      const replyContent = result.reply || result.response || result.message || result;
-      setMessages(prev => [...prev, {
-        id: prev.length + 1,
-        type: 'bot',
-        content: typeof replyContent === 'string' ? replyContent : JSON.stringify(replyContent),
-        timestamp: new Date(),
-      }]);
-      setPendingAction(null);
-    } catch (err) {
-      console.error('Action confirmation failed:', err);
-      setPendingAction(null);
-      setMessages(prev => [...prev, {
-        id: prev.length + 1,
-        type: 'bot',
-        content: 'I could not confirm the action right now. Please try again.',
-        timestamp: new Date(),
       }]);
     } finally {
       setIsTyping(false);
@@ -237,10 +195,23 @@ const ChatAssistant = () => {
     const targets = [];
     for (const line of String(text || '').split('\n')) {
       const match = line.match(/\*\*([A-Za-z][A-Za-z0-9 .'-]{1,80})\*\*/);
-      if (!match) continue;
-      const name = match[1].trim();
-      if (name.toLowerCase() === absentFaculty) continue;
-      targets.push(name);
+      if (match) {
+        const name = match[1].trim();
+        if (name.toLowerCase() !== absentFaculty) {
+          targets.push(name);
+        }
+        continue;
+      }
+
+      const candidates = line.split(':').slice(1).join(':').split(',');
+      for (const candidate of candidates) {
+        const candidateMatch = candidate.trim().match(/^([A-Za-z][A-Za-z0-9 .'-]{1,80})\s+\(score/i);
+        if (!candidateMatch) continue;
+        const name = candidateMatch[1].trim();
+        if (name.toLowerCase() !== absentFaculty) {
+          targets.push(name);
+        }
+      }
     }
     return [...new Map(targets.map((name) => [name.toLowerCase(), name])).values()];
   };
@@ -255,7 +226,6 @@ const ChatAssistant = () => {
     setMessages([{ ...WELCOME_MESSAGE, id: 1, timestamp: new Date() }]);
     setSubstitutionTargets([]);
     setSubstitutionFaculty('');
-    setPendingAction(null);
     try {
       const created = await createChatSession('Timetable Assistant Session');
       if (created.session_id) {
@@ -320,7 +290,7 @@ const ChatAssistant = () => {
             <h1>AI Assistant</h1>
             <span className="status">
               <span className="status-dot"></span>
-              {assistantMode === 'ai' ? 'AI mode' : 'Manual mode'}
+              Assistant ready
             </span>
           </div>
         </div>
@@ -330,16 +300,10 @@ const ChatAssistant = () => {
               New Chat
             </button>
             <div className={`assistant-mode-pill ${assistantMode === 'ai' ? 'ai' : 'manual'}`}>
-              {assistantMode === 'ai' ? 'Groq enabled' : 'Manual fallback'}
+              Substitution tools ready
             </div>
           </div>
       </div>
-
-      {assistantNotice && (
-        <div className={`assistant-banner ${assistantMode === 'ai' ? 'ai' : 'manual'}`}>
-          {assistantNotice}
-        </div>
-      )}
 
       {/* Chat Container */}
       <div className="chat-container">
