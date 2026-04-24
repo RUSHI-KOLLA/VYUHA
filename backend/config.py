@@ -204,9 +204,8 @@ class AppConfig:
             errors.extend([f"Email: {e}" for e in self.email.validate()])
         if self.security:
             errors.extend([f"Security: {e}" for e in self.security.validate()])
-                    # if not normalized.startswith("https://"):
-                    #    errors.append(f"Security: origin must use https in production: {origin}")
-                    pass
+            # if self.environment == Environment.PRODUCTION:
+            #     pass
 
         return errors
 
