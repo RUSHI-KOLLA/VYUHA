@@ -351,14 +351,17 @@ body {
 
 .pricing-features li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.75rem;
   color: #d1d5db;
-  white-space: nowrap;
+  line-height: 1.4;
+  text-align: left;
 }
 
 .pricing-features li svg {
   color: var(--lp-primary);
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 
 .pricing-btn {
