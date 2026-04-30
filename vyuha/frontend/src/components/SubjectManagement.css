@@ -1,0 +1,52 @@
+.subject-management {
+  padding: 24px;
+  background: #f5f7fa;
+  min-height: 100vh;
+}
+
+.subjects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.subject-card {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.subject-icon {
+  width: 48px;
+  height: 48px;
+  background: #fce7f3;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #db2777;
+}
+
+.subject-info h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 4px;
+}
+
+.subject-code {
+  color: #667eea;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.subject-detail {
+  color: #6b7280;
+  font-size: 13px;
+}

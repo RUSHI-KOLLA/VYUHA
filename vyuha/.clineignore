@@ -1,0 +1,27 @@
+# Node and Python dependencies
+node_modules/
+**/node_modules/
+venv/
+**/venv/
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.env
+**/.env
+.git/
+
+# Build artifacts and temp
+dist/
+build/
+.next/
+.cache/
+*.log
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Data files
+*.xlsx
+*.csv
+*.sql

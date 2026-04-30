@@ -1,0 +1,332 @@
+{
+  "project": "VYUHA - AI Timetable & Substitution System",
+  "design_system": {
+    "colors": {
+      "primary": "#007bff",
+      "secondary": "#6c757d",
+      "background": "#f8f9fa",
+      "surface": "#ffffff",
+      "text_primary": "#212529",
+      "text_secondary": "#6c757d",
+      "success": "#28a745",
+      "warning": "#ffc107",
+      "danger": "#dc3545"
+    },
+    "typography": {
+      "font_family": "Inter, system-ui, sans-serif",
+      "font_size_base": "14px",
+      "font_size_sm": "12px",
+      "font_size_lg": "16px",
+      "font_size_xl": "20px",
+      "font_weight_normal": 400,
+      "font_weight_medium": 500,
+      "font_weight_bold": 600
+    },
+    "spacing": {
+      "unit": "8px",
+      "xs": "4px",
+      "sm": "8px",
+      "md": "16px",
+      "lg": "24px",
+      "xl": "32px"
+    },
+    "border_radius": {
+      "sm": "4px",
+      "md": "8px",
+      "lg": "12px",
+      "full": "9999px"
+    }
+  },
+  "screens": [
+    {
+      "name": "Login",
+      "components": [
+        {
+          "type": "container",
+          "style": "centered_card",
+          "children": [
+            {
+              "type": "heading",
+              "text": "VYUHA",
+              "style": "h1"
+            },
+            {
+              "type": "subheading",
+              "text": "AI-Powered Timetable & Substitution System",
+              "style": "subtitle"
+            },
+            {
+              "type": "form",
+              "fields": [
+                {
+                  "type": "email",
+                  "label": "Email",
+                  "placeholder": "admin@college.edu",
+                  "required": true
+                },
+                {
+                  "type": "password",
+                  "label": "Password",
+                  "placeholder": "••••••••",
+                  "required": true
+                }
+              ],
+              "actions": [
+                {
+                  "type": "button",
+                  "text": "Sign In",
+                  "variant": "primary",
+                  "full_width": true
+                }
+              ]
+            },
+            {
+              "type": "link",
+              "text": "Forgot Password?",
+              "action": "navigate_to_forgot_password"
+            },
+            {
+              "type": "divider"
+            },
+            {
+              "type": "button",
+              "text": "Register New College",
+              "variant": "secondary",
+              "full_width": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "layout": "sidebar + main_content",
+      "components": [
+        {
+          "type": "sidebar",
+          "items": [
+            {"icon": "calendar", "label": "Timetable", "active": true},
+            {"icon": "upload", "label": "Upload Excel", "active": false},
+            {"icon": "message-square", "label": "Chat Assistant", "active": false},
+            {"icon": "users", "label": "Faculty", "active": false},
+            {"icon": "file-text", "label": "Reports", "active": false},
+            {"icon": "settings", "label": "Settings", "active": false}
+          ]
+        },
+        {
+          "type": "main_content",
+          "children": [
+            {
+              "type": "header",
+              "content": {
+                "title": "Dashboard",
+                "subtitle": "Welcome back, Admin",
+                "actions": [
+                  {
+                    "type": "button",
+                    "text": "Generate Timetable",
+                    "variant": "primary"
+                  },
+                  {
+                    "type": "button",
+                    "text": "View Substitutions",
+                    "variant": "secondary"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 3,
+              "cards": [
+                {
+                  "title": "Total Faculty",
+                  "value": "45",
+                  "icon": "users",
+                  "trend": "+2 this month"
+                },
+                {
+                  "title": "Active Classes",
+                  "value": "68",
+                  "icon": "book-open",
+                  "trend": "Today"
+                },
+                {
+                  "title": "Pending Leaves",
+                  "value": "3",
+                  "icon": "clock",
+                  "trend": "Requires attention"
+                }
+              ]
+            },
+            {
+              "type": "timetable_preview",
+              "title": "This Week's Schedule",
+              "semester_selector": true,
+              "view_mode": "grid"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "TimetableEditor",
+      "layout": "toolbar + grid",
+      "components": [
+        {
+          "type": "toolbar",
+          "items": [
+            {
+              "type": "select",
+              "label": "Semester",
+              "options": ["1", "2", "3", "4", "5", "6", "7", "8"]
+            },
+            {
+              "type": "select",
+              "label": "Day",
+              "options": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            },
+            {
+              "type": "button",
+              "text": "Auto-Generate",
+              "variant": "primary"
+            },
+            {
+              "type": "button",
+              "text": "Save",
+              "variant": "success"
+            },
+            {
+              "type": "button",
+              "text": "Export",
+              "variant": "secondary"
+            }
+          ]
+        },
+        {
+          "type": "timetable_grid",
+          "columns": ["Time", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+          "rows": [
+            "08:00-09:00",
+            "09:00-10:00",
+            "10:00-11:00",
+            "11:00-12:00",
+            "12:00-13:00",
+            "13:00-14:00",
+            "14:00-15:00",
+            "15:00-16:00",
+            "16:00-17:00"
+          ],
+          "cell_content": [
+            "Subject Name",
+            "Faculty Name",
+            "Room Number"
+          ],
+          "conflict_highlight": "red_background",
+          "drag_and_drop": true
+        }
+      ]
+    },
+    {
+      "name": "ChatInterface",
+      "layout": "sidebar + chat_area",
+      "components": [
+        {
+          "type": "sidebar",
+          "sections": [
+            {
+              "title": "Recent Conversations",
+              "items": [
+                {"text": "Prof. Sharma leave", "time": "10:30 AM", "unread": 2},
+                {"text": "Room availability", "time": "Yesterday", "unread": 0}
+              ]
+            },
+            {
+              "title": "Quick Actions",
+              "items": [
+                {"text": "Check faculty availability", "action": "quick_check"},
+                {"text": "Find substitute", "action": "find_sub"},
+                {"text": "View today's schedule", "action": "view_schedule"}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "chat_area",
+          "messages": [
+            {
+              "type": "user",
+              "text": "Prof. Sharma is on leave today",
+              "timestamp": "10:30 AM"
+            },
+            {
+              "type": "ai",
+              "text": "I found 2 classes for Prof. Sharma today:\n\n1. 9:00 AM - Maths (Semester 1)\n   Suggested substitute: Prof. Priya (currently has 2 classes)\n   [Confirm] [Reject]\n\n2. 2:00 PM - Statistics (Semester 3)\n   Suggested substitute: Prof. Kumar (currently has 1 class)\n   [Confirm] [Reject]",
+              "timestamp": "10:30 AM"
+            }
+          ],
+          "input": {
+            "placeholder": "Type your message...",
+            "send_button": true,
+            "voice_input": true
+          }
+        }
+      ]
+    }
+  ],
+  "components": {
+    "Button": {
+      "variants": {
+        "primary": {
+          "background": "#007bff",
+          "text_color": "#ffffff",
+          "hover": "#0056b3"
+        },
+        "secondary": {
+          "background": "#6c757d",
+          "text_color": "#ffffff",
+          "hover": "#545b62"
+        },
+        "success": {
+          "background": "#28a745",
+          "text_color": "#ffffff",
+          "hover": "#1e7e34"
+        },
+        "danger": {
+          "background": "#dc3545",
+          "text_color": "#ffffff",
+          "hover": "#c82333"
+        }
+      },
+      "sizes": {
+        "sm": {"padding": "8px 16px", "font_size": "12px"},
+        "md": {"padding": "12px 24px", "font_size": "14px"},
+        "lg": {"padding": "16px 32px", "font_size": "16px"}
+      }
+    },
+    "Card": {
+      "padding": "16px",
+      "border_radius": "8px",
+      "box_shadow": "0 2px 4px rgba(0,0,0,0.1)",
+      "background": "#ffffff"
+    },
+    "Input": {
+      "padding": "12px",
+      "border": "1px solid #dee2e6",
+      "border_radius": "4px",
+      "font_size": "14px",
+      "focus_border": "#007bff"
+    },
+    "Select": {
+      "padding": "12px",
+      "border": "1px solid #dee2e6",
+      "border_radius": "4px",
+      "background": "#ffffff"
+    }
+  },
+  "responsive_breakpoints": {
+    "mobile": "max-width: 640px",
+    "tablet": "max-width: 1024px",
+    "desktop": "min-width: 1025px"
+  }
+}

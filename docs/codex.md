@@ -1,0 +1,95 @@
+# CODEX Change Log
+
+## 2026-04-03
+- **AI Chatbot Overhaul** — Fixed 11 critical issues in `chat_handler.py`:
+  - `call_groq()` now sends multi-turn conversation history (was sending single message — AI had zero context memory).
+  - Added `_resolve_pronoun_to_faculty()` — pronouns ("him", "his", "her", "he", "she", "them") now resolve to the most recently referenced faculty via context → memory facts → conversation history chain.
+  - System prompt now includes `CONVERSATION MEMORY` section with last referenced faculty, substitution targets, and active context.
+  - Added `PRONOUN_SUBSTITUTION_PATTERNS` for detecting pronoun-based follow-ups ("i want substitution for him").
+  - Added `PRONOUN_TOKENS` set with all pronoun forms including possessives ("his", "hers").
+  - Added AI→manual fallback for schedule queries: when Groq API fails/timeouts, schedule queries now fall back to deterministic `execute_query_timetable()` instead of showing "AI unavailable".
+  - Schedule intent now pre-resolves pronouns ("get his schedule" → resolves "his" before querying).
+  - Fixed faculty name regex: `[A-Za-z]` → `[A-Za-z0-9]` — captures numeric faculty identifiers like "01" from "faculty 01".
+  - Pronoun-aware memory saving: when user says "his schedule" or "for him", the resolved faculty name is saved to `last_referenced_faculty` memory fact for future messages.
+  - Added `last_referenced_faculty` to `_merge_chat_context()`.
+  - Updated `_manual_assistant_response()` to accept and use `memory_facts` for pronoun resolution.
+  - Updated entity extraction guard with all pronoun forms ("he", "she", "his", "hers") to prevent them being treated as faculty names.
+- **Frontend ChatAssistant improvements:**
+  - Added `renderMarkdown()` — bot messages now render **bold**, line breaks, and bullet lists as proper HTML.
+  - Added "New Chat" button (green, in header) — resets session, clears state, creates new session via API.
+  - Added CSS styles for markdown rendering and new chat button.
+- Created `AGENTS.md` with debugging workflows, architecture diagrams, pronoun resolution chain, and common pitfalls.
+- Verification: backend syntax check passed, all files compile clean.
+
+## 2026-03-28
+- Started production hardening pass for VYUHA.
+- Scope: tenant isolation, RBAC enforcement, status normalization, API/frontend connection fixes, and fake fallback removal.
+- Hardened tenant header validation: `get_college_id` now validates length and no longer truncates IDs.
+- Removed unsafe RBAC fallback that could fabricate admin role in `require_roles`.
+- Bound JWT user tenant to `X-College-ID` for non-superadmin users in `get_current_user_from_token`.
+- Protected AUTO handler endpoints (`process-leave`, `validate-timetable`, `generate-and-validate`, `dashboard-stats`) with authenticated admin/HOD checks.
+- Scoped auto substitution confirmation lookup by tenant and fixed notification user lookup handling (`.data` response handling).
+- Normalized leave/substitution statuses to lowercase writes (`pending/approved/rejected/cancelled`) and made pending reads backward-compatible with legacy `Pending`.
+- Enforced leave cancellation authorization: only admin/HOD/superadmin or owning faculty user can cancel.
+- Added missing backend CRUD endpoints for faculty/subjects/rooms (create/update/delete) with role guards.
+- Fixed approval flow wiring: frontend now uses authenticated API client for `/approve-timetable` (removed hardcoded `DEFAULT` tenant header).
+- Secured `/approve-timetable` endpoint with role checks.
+- Fixed timetable export response to stream a real `.xlsx` file instead of hex-in-JSON.
+- Removed mock fallback datasets from faculty/subject/room/leave management pages; API failures now surface as empty-state data.
+- Corrected room and leave data mapping in frontend components.
+- Verification run: frontend lint (warnings only), frontend build success, backend compile success.
+- Removed demo-login path from UI and auth context (`Login`, `AppRoutes`, `AuthProvider`).
+- Dashboard no longer auto-marks Upload step from existing DB counts.
+- Generation now requires a successful Excel upload in the current session.
+- Excel upload endpoint now supports strict file-driven behavior by replacing existing tenant data before insert (`replace_existing=true` default).
+- Re-verified: frontend lint/build pass (warnings only), backend compile pass.
+## 2026-03-29
+- Implemented Superadmin "Add College" UI flow with full create-college modal form.
+- Added validation for required fields and minimum admin password length.
+- Wired modal submit to `/superadmin/colleges` via `superadminAPI.createCollege`.
+- Added loading/error/success feedback for college creation.
+- Added reusable panel-level success message and dismiss control.
+- Added modal and form styles in `SuperAdminPanel.css`.
+- Verified frontend lint/build pass (warnings only, no errors).
+- Added public college onboarding request endpoint: `POST /auth/request-college`.
+- Added onboarding models in auth: `CollegeRequest`, `InviteUserRequest`.
+- Added robust unique college ID generator in auth/superadmin routers (replaces weak `COL{len(code)}` logic).
+- Updated login guard: non-superadmin users cannot login unless their college status is `active`.
+- Added `POST /auth/invite-user` so admin/HOD can directly create teacher/staff users.
+- Updated superadmin approve flow to activate inactive users of approved college.
+- Added `authAPI.requestCollege` and `authAPI.inviteUser` in frontend API client.
+- Updated Login page with a new `request_college` mode and full onboarding-request form.
+- Updated User Management "Add User" button to "Invite Teacher" and wired it to `invite-user` API.
+- Re-verified backend compile and frontend lint/build pass (warnings only).
+- Fixed backend request logging middleware bug: `log_request_middleware` is now async and correctly awaits `call_next`.
+- Fixed onboarding startup compatibility: replaced `EmailStr` usage in new onboarding/invite request models with `str` to avoid missing `email-validator` runtime dependency.
+- Added backward compatibility for older `colleges` schema where `code` column is absent (request/create college now fallback without writing `code`).
+- Restarted backend during validation and verified `/health` route responds successfully.
+- Added production-safe DB error translation in auth onboarding flow:
+  - Missing table/schema cache errors now return a clear 503 with setup guidance instead of raw PostgREST traces.
+  - Added rollback of newly-created college if admin-user creation fails.
+  - Made superadmin notification failure non-fatal for onboarding completion.
+- Hardened Excel upload importer against legacy schema constraints:
+  - Added retry fallback for `value too long for type character varying(N)` by trimming string payloads to `N`.
+  - Existing missing-column fallback (`PGRST204`) remains in place.
+- Removed production demo seed inserts from `backend/schema.sql` (`COL001`, demo admin, demo feature_flags).
+- Fixed backend env boot order:
+  - `main.py` now calls `load_dotenv()` before importing DB/auth modules.
+  - Prevents import-time config issues for Supabase/JWT.
+- Added Supabase key-role guard in `backend/database.py`:
+  - If `SUPABASE_SERVICE_ROLE_KEY` is present but not actually `service_role`, backend warns and falls back to `SUPABASE_KEY`.
+- Fixed malformed local backend `.env` entry where `JWT_SECRET` was accidentally concatenated to `GMAIL_APP_PASSWORD`.
+- Removed remaining demo wording in superadmin create-college response payload.
+- Patched `backend/schema.sql` for legacy DB compatibility where `notifications.user_id` was missing:
+  - Added `ALTER TABLE ... ADD COLUMN IF NOT EXISTS user_id`.
+  - Added guarded FK creation for `notifications_user_id_fkey`.
+  - Updated notifications RLS policy comparison to `user_id::text = current_setting('app.user_id', true)`.
+- Improved frontend production diagnostics for backend connectivity failures:
+  - Added `normalizeApiError` utility in `frontend/src/lib/api.js`.
+  - Network/CORS/API-down errors now show actionable message with configured `VITE_API_URL`.
+  - Wired AuthProvider login/register and Login request-college flow to use normalized errors.
+- Re-verified frontend production build passes after error-handling changes.
+- Validation:
+  - Backend compile check passed for modified files.
+  - Frontend production build passed.
+  - Live backend port binding failed in this session environment, so full runtime endpoint smoke could not be completed here.
